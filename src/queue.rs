@@ -29,22 +29,6 @@ impl Queue {
         )
     }
 
-    pub async fn publish<D: Serialize>(
-        &self,
-        job: &Job<'_, D>,
-        connection: &mut impl redis::aio::ConnectionLike,
-    ) -> Result<(), RedisError> {
-        let id = &job.id;
-
-        job.save(self, connection).await?;
-        cmd("RPUSH")
-            .arg(self.key())
-            .arg(id)
-            .exec_async(connection)
-            .await?;
-        Ok(())
-    }
-
     pub async fn get_job<'a, D: DeserializeOwned>(
         &self,
         id: &str,
@@ -66,5 +50,19 @@ impl Queue {
         let mut job = serde_json::from_str::<Job<D>>(&data).unwrap();
         job.queue = self;
         Ok(Some(job))
+    }
+
+    pub async fn publish(
+        &self,
+        job_id: &str,
+        connection: &mut impl redis::aio::ConnectionLike,
+    ) -> Result<(), RedisError> {
+        cmd("RPUSH")
+            .arg(self.key())
+            .arg(&job_id)
+            .exec_async(connection)
+            .await?;
+
+        Ok(())
     }
 }

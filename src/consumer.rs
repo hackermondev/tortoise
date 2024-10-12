@@ -1,8 +1,12 @@
+use chrono::Utc;
 use redis::{cmd, RedisError};
 use serde::de::DeserializeOwned;
 
 use crate::{job::Job, queue::Queue};
 
+static CONSUMER_PING_EX_SECONDS: usize = 60 * 5;
+
+#[derive(Debug)]
 pub struct Consumer<'a> {
     queue: &'a Queue,
     initialized: bool,
@@ -47,6 +51,25 @@ impl<'a> Consumer<'a> {
         Ok(())
     }
 
+    pub async fn ping(
+        &self,
+        connection: &mut impl redis::aio::ConnectionLike,
+    ) -> Result<(), RedisError> {
+        let consumer_ping = crate::keys::format(
+            crate::keys::TORTOISE_QUEUE_CONSUMER_PROGRESS_PING,
+            &[&self.queue.namespace, &self.queue.name],
+        );
+
+        cmd("SET")
+            .arg(&consumer_ping)
+            .arg(&self.identifier)
+            .arg("EX")
+            .arg(CONSUMER_PING_EX_SECONDS)
+            .exec_async(connection)
+            .await?;
+        todo!()
+    }
+
     pub async fn next_job<D: DeserializeOwned>(
         &self,
         connection: &mut impl redis::aio::ConnectionLike,
@@ -71,7 +94,31 @@ impl<'a> Consumer<'a> {
         }
 
         let job_id = job_id.unwrap();
-        let job = self.queue.get_job(&job_id, connection).await?;
+        let mut job = self.queue.get_job(&job_id, connection).await?;
+        if let Some(job) = job.as_mut() {
+            job.consumer = Some(self);
+            job.metadata.attempts += 1;
+            job.metadata.last_attempt_at = Some(Utc::now());
+        }
+
+        self.ping(connection).await?;
         Ok(job)
+    }
+
+    pub(crate) async fn drop_job(
+        &self,
+        job_id: &str,
+        connection: &mut impl redis::aio::ConnectionLike,
+    ) -> Result<(), RedisError> {
+        let key = self.key();
+        cmd("LREM")
+            .arg(key)
+            .arg(1)
+            .arg(job_id)
+            .exec_async(connection)
+            .await?;
+
+        self.ping(connection).await?;
+        Ok(())
     }
 }
