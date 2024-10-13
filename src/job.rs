@@ -54,7 +54,10 @@ impl<'a, D: Serialize> Job<'a, D> {
             queue,
             id,
             data,
-            metadata: JobMetadata::default(),
+            metadata: JobMetadata {
+                created_at: Utc::now(),
+                ..Default::default()
+            },
         }
     }
 

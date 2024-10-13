@@ -52,7 +52,7 @@ impl Queue {
         Ok(Some(job))
     }
 
-    pub async fn publish(
+    pub(crate) async fn publish(
         &self,
         job_id: &str,
         connection: &mut impl redis::aio::ConnectionLike,

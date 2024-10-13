@@ -1,4 +1,5 @@
 use chrono::Utc;
+use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use redis::{cmd, RedisError};
 use serde::de::DeserializeOwned;
 
@@ -15,7 +16,14 @@ pub struct Consumer<'a> {
 
 impl<'a> Consumer<'a> {
     pub fn identifier() -> String {
-        String::new()
+        let hostname = gethostname::gethostname();
+        let token: String = thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(7)
+            .map(char::from)
+            .collect();
+
+        format!("{}-{}", hostname.to_str().unwrap(), token)
     }
 
     pub fn new(queue: &'a Queue) -> Self {
@@ -57,7 +65,7 @@ impl<'a> Consumer<'a> {
     ) -> Result<(), RedisError> {
         let consumer_ping = crate::keys::format(
             crate::keys::TORTOISE_QUEUE_CONSUMER_PROGRESS_PING,
-            &[&self.queue.namespace, &self.queue.name],
+            &[&self.queue.namespace, &self.queue.name, &self.identifier],
         );
 
         cmd("SET")
@@ -67,7 +75,7 @@ impl<'a> Consumer<'a> {
             .arg(CONSUMER_PING_EX_SECONDS)
             .exec_async(connection)
             .await?;
-        todo!()
+        Ok(())
     }
 
     pub async fn next_job<D: DeserializeOwned>(
