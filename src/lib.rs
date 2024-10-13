@@ -1,6 +1,7 @@
 pub mod consumer;
 pub mod job;
 pub mod queue;
+pub(crate) mod scripts;
 
 pub(crate) mod keys {
     pub static TORTOISE_QUEUE_LIST: &str = "tortoise:{}:queue:{}";
@@ -9,7 +10,6 @@ pub(crate) mod keys {
     pub static TORTOISE_QUEUE_CONSUMER_PROGRESS_LIST: &str = "tortoise:{}:queue:{}:progress:{}";
     pub static TORTOISE_QUEUE_CONSUMER_PROGRESS_PING: &str =
         "tortoise:{}:queue:{}:progress:{}:ping";
-    pub static TORTOISE_QUEUE_CONSUMER_CLEANUP_TRAP: &str = "tortoise:{}:queue:{}:cleanup";
 
     pub fn format(key: &str, data: &[&str]) -> String {
         let mut key = String::from(key);

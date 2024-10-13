@@ -2,15 +2,15 @@ use chrono::Utc;
 use redis::{cmd, RedisError};
 use serde::de::DeserializeOwned;
 
-use crate::{job::Job, queue::Queue};
+use crate::{job::Job, queue::Queue, scripts};
 
 static CONSUMER_PING_EX_SECONDS: usize = 60 * 5;
 
 #[derive(Debug)]
 pub struct Consumer<'a> {
-    queue: &'a Queue,
-    initialized: bool,
-    identifier: String,
+    pub(crate) queue: &'a Queue,
+    pub(crate) initialized: bool,
+    pub(crate) identifier: String,
 }
 
 impl<'a> Consumer<'a> {
@@ -51,7 +51,7 @@ impl<'a> Consumer<'a> {
         Ok(())
     }
 
-    pub async fn ping(
+    pub async fn pong(
         &self,
         connection: &mut impl redis::aio::ConnectionLike,
     ) -> Result<(), RedisError> {
@@ -101,7 +101,7 @@ impl<'a> Consumer<'a> {
             job.metadata.last_attempt_at = Some(Utc::now());
         }
 
-        self.ping(connection).await?;
+        self.pong(connection).await?;
         Ok(job)
     }
 
@@ -118,7 +118,39 @@ impl<'a> Consumer<'a> {
             .exec_async(connection)
             .await?;
 
-        self.ping(connection).await?;
+        self.pong(connection).await?;
         Ok(())
+    }
+
+    pub async fn drop(
+        self,
+        connection: &mut impl redis::aio::ConnectionLike,
+    ) -> Result<usize, RedisError> {
+        let queue_key = self.queue.key();
+        let key = self.key();
+
+        scripts::ATOMIC_MIGRATE_LIST
+            .arg(key)
+            .key(queue_key)
+            .invoke_async(connection)
+            .await
+    }
+}
+
+impl Consumer<'_> {
+    pub async fn ping(
+        queue: &Queue,
+        consumer_id: &str,
+        connection: &mut impl redis::aio::ConnectionLike,
+    ) -> Result<bool, RedisError> {
+        let consumer_ping = crate::keys::format(
+            crate::keys::TORTOISE_QUEUE_CONSUMER_PROGRESS_PING,
+            &[&queue.namespace, &queue.name, consumer_id],
+        );
+
+        cmd("EXISTS")
+            .arg(consumer_ping)
+            .query_async(connection)
+            .await
     }
 }
