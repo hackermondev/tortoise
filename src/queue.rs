@@ -40,7 +40,7 @@ impl Queue {
         );
         let data = cmd("GET")
             .arg(job_key)
-            .query_async::<Option<String>>(connection)
+            .query_async::<_, Option<String>>(connection)
             .await?;
         if data.is_none() {
             return Ok(None);
@@ -60,7 +60,7 @@ impl Queue {
         cmd("RPUSH")
             .arg(self.key())
             .arg(job_id)
-            .exec_async(connection)
+            .query_async::<_, ()>(connection)
             .await?;
 
         Ok(())
@@ -82,7 +82,9 @@ impl Queue {
             c.arg(cursor);
         }
 
-        let (cursor, consumers) = c.query_async::<(String, Vec<String>)>(connection).await?;
+        let (cursor, consumers) = c
+            .query_async::<_, (String, Vec<String>)>(connection)
+            .await?;
         Ok((consumers, cursor))
     }
 }

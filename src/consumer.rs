@@ -7,7 +7,7 @@ use crate::{job::Job, queue::Queue, scripts};
 
 static CONSUMER_PING_EX_SECONDS: usize = 60 * 5;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Consumer<'a> {
     pub(crate) queue: &'a Queue,
     pub(crate) initialized: bool,
@@ -53,7 +53,7 @@ impl<'a> Consumer<'a> {
         cmd("SADD")
             .arg(&consumer_list)
             .arg(&self.identifier)
-            .exec_async(connection)
+            .query_async::<_, ()>(connection)
             .await?;
         self.initialized = true;
         Ok(())
@@ -73,7 +73,7 @@ impl<'a> Consumer<'a> {
             .arg(&self.identifier)
             .arg("EX")
             .arg(CONSUMER_PING_EX_SECONDS)
-            .exec_async(connection)
+            .query_async::<_, ()>(connection)
             .await?;
         Ok(())
     }
@@ -94,7 +94,7 @@ impl<'a> Consumer<'a> {
             .arg(consumer)
             .arg("RIGHT")
             .arg("LEFT")
-            .query_async::<Option<String>>(connection)
+            .query_async::<_, Option<String>>(connection)
             .await?;
 
         if job_id.is_none() {
@@ -123,7 +123,7 @@ impl<'a> Consumer<'a> {
             .arg(key)
             .arg(1)
             .arg(job_id)
-            .exec_async(connection)
+            .query_async::<_, ()>(connection)
             .await?;
 
         self.pong(connection).await?;

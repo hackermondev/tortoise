@@ -76,14 +76,17 @@ impl<'a, D: Serialize> Job<'a, D> {
         );
 
         if self.metadata.finished {
-            cmd("DEL").arg(&job_key).exec_async(connection).await?;
+            cmd("DEL")
+                .arg(&job_key)
+                .query_async::<_, ()>(connection)
+                .await?;
             return Ok(());
         }
 
         cmd("SET")
             .arg(&job_key)
             .arg(&serialized)
-            .exec_async(connection)
+            .query_async::<_, ()>(connection)
             .await?;
         Ok(())
     }
