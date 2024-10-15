@@ -71,9 +71,9 @@ async fn updating_job() {
         .expect("Failed to get Consumer job");
 
     assert!(updated_job.is_some());
-    println!("{:?}", updated_job.as_ref().unwrap().metadata);
+    println!("{:?}", updated_job.as_ref().unwrap().metadata());
     assert!(updated_job.as_ref().unwrap().data["counter"] == 2);
-    assert!(updated_job.as_ref().unwrap().metadata.attempts == 2);
+    assert!(updated_job.as_ref().unwrap().metadata().attempts == 2);
 }
 
 #[tokio::test]

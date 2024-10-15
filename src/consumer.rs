@@ -1,7 +1,6 @@
-use chrono::Utc;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use redis::{cmd, RedisError};
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{job::Job, queue::Queue, scripts};
 
@@ -34,7 +33,7 @@ impl<'a> Consumer<'a> {
         }
     }
 
-    pub(crate) fn key(&self) -> String {
+    pub(crate) fn redis_key(&self) -> String {
         crate::keys::format(
             crate::keys::TORTOISE_QUEUE_CONSUMER_PROGRESS_LIST,
             &[&self.queue.namespace, &self.queue.name, &self.identifier],
@@ -78,7 +77,7 @@ impl<'a> Consumer<'a> {
         Ok(())
     }
 
-    pub async fn next_job<D: DeserializeOwned>(
+    pub async fn next_job<D: DeserializeOwned + Serialize>(
         &self,
         connection: &mut impl redis::aio::ConnectionLike,
     ) -> Result<Option<Job<D>>, RedisError> {
@@ -87,7 +86,7 @@ impl<'a> Consumer<'a> {
         }
 
         let queue = self.queue.key();
-        let consumer = self.key();
+        let consumer = self.redis_key();
 
         let job_id = cmd("LMOVE")
             .arg(queue)
@@ -105,8 +104,8 @@ impl<'a> Consumer<'a> {
         let mut job = self.queue.get_job(&job_id, connection).await?;
         if let Some(job) = job.as_mut() {
             job.consumer = Some(self);
-            job.metadata.attempts += 1;
-            job.metadata.last_attempt_at = Some(Utc::now());
+            job.tick_attempt();
+            job.save(connection).await?;
         }
 
         self.pong(connection).await?;
@@ -118,7 +117,7 @@ impl<'a> Consumer<'a> {
         job_id: &str,
         connection: &mut impl redis::aio::ConnectionLike,
     ) -> Result<(), RedisError> {
-        let key = self.key();
+        let key = self.redis_key();
         cmd("LREM")
             .arg(key)
             .arg(1)
@@ -135,7 +134,7 @@ impl<'a> Consumer<'a> {
         connection: &mut impl redis::aio::ConnectionLike,
     ) -> Result<usize, RedisError> {
         let queue_key = self.queue.key();
-        let key = self.key();
+        let key = self.redis_key();
 
         scripts::ATOMIC_MIGRATE_LIST
             .arg(key)
