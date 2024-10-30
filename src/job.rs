@@ -1,5 +1,3 @@
-use std::sync::LazyLock;
-
 use chrono::{DateTime, Utc};
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use redis::{cmd, RedisError};
@@ -8,25 +6,19 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use crate::{consumer::Consumer, queue::Queue};
 static SCHEMA_VERSION: u64 = 1;
 
-static SERDE_QUEUE_DEFAULT: LazyLock<Queue> = LazyLock::new(Queue::default);
-fn serde_queue_default() -> &'static Queue {
-    &SERDE_QUEUE_DEFAULT
+#[derive(Debug)]
+pub struct Job<'a, D, R: redis::aio::ConnectionLike> {
+    pub inner: JobInner<D>,
+    pub(crate) queue: Option<&'a Queue<R>>,
+    pub(crate) consumer: Option<&'a Consumer<'a, R>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Job<'a, D> {
-    // Serde serialized data
+pub struct JobInner<D> {
     pub _version: u64,
     pub nonce: String,
     pub data: D,
     metadata: JobMetadata,
-
-    #[serde(skip)]
-    #[serde(default = "serde_queue_default")]
-    pub(crate) queue: &'a Queue,
-
-    #[serde(skip)]
-    pub(crate) consumer: Option<&'a Consumer<'a>>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -37,7 +29,7 @@ pub struct JobMetadata {
     pub finished: bool,
 }
 
-impl<'a, D: Serialize + DeserializeOwned> Job<'a, D> {
+impl<'a, D: Serialize + DeserializeOwned, R: redis::aio::ConnectionLike> Job<'a, D, R> {
     fn gen_nonce() -> String {
         thread_rng()
             .sample_iter(&Alphanumeric)
@@ -46,71 +38,79 @@ impl<'a, D: Serialize + DeserializeOwned> Job<'a, D> {
             .collect()
     }
 
-    pub fn new(data: D, queue: &'a Queue) -> Self {
+    pub fn new(data: D, queue: &'a Queue<R>) -> Self {
         let nonce = Self::gen_nonce();
-        Self {
+        let inner = JobInner {
             _version: SCHEMA_VERSION,
-            consumer: None,
-            queue,
-            nonce,
             data,
+            nonce,
             metadata: JobMetadata {
                 created_at: Utc::now(),
                 ..Default::default()
             },
+        };
+
+        Self {
+            consumer: None,
+            queue: Some(queue),
+            inner,
         }
     }
 
     pub(crate) fn redis_key(&self) -> String {
+        let queue = self.queue.unwrap();
         crate::keys::format(
             crate::keys::TORTOISE_QUEUE_JOB,
-            &[&self.queue.namespace, &self.queue.name, &self.nonce],
+            &[&queue.namespace, &queue.name, &self.inner.nonce],
         )
     }
 
     pub fn serialized(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(&self)
+        serde_json::to_string(&self.inner)
     }
 
     pub fn metadata(&self) -> &JobMetadata {
-        &self.metadata
+        &self.inner.metadata
     }
 
     pub fn set_nonce(&mut self, nonce: &str) {
-        self.nonce = nonce.to_string();
+        self.inner.nonce = nonce.to_string();
     }
 
     pub(crate) fn tick_attempt(&mut self) {
-        self.metadata.attempts += 1;
-        self.metadata.last_attempt_at = Some(Utc::now());
+        self.inner.metadata.attempts += 1;
+        self.inner.metadata.last_attempt_at = Some(Utc::now());
     }
-     
-    pub async fn sync_metadata(&mut self, connection: &mut impl redis::aio::ConnectionLike) -> Result<(), RedisError> {
+
+    pub async fn sync_metadata(&mut self) -> Result<(), RedisError> {
+        let queue = self.queue.unwrap();
+        let mut connection = queue._redis.lock().await;
+
         let job_key = self.redis_key();
         let data = cmd("GET")
             .arg(&job_key)
-            .query_async::<_, Option<String>>(connection)
+            .query_async::<_, Option<String>>(&mut *connection)
             .await?;
 
         if let Some(data) = data {
-            let data: Job<'_, D> = serde_json::from_str(&data).unwrap();
-            self.metadata = data.metadata;
+            let data: JobInner<D> = serde_json::from_str(&data).unwrap();
+            self.inner.metadata = data.metadata;
         }
 
         Ok(())
     }
 
-    pub(crate) async fn save(
-        &self,
-        connection: &mut impl redis::aio::ConnectionLike,
-    ) -> Result<(), RedisError> {
+    pub async fn save(&self) -> Result<(), RedisError> {
+        let queue = self.queue.unwrap();
+        let mut connection = queue._redis.lock().await;
+
         let serialized = self.serialized().unwrap();
         let job_key = self.redis_key();
 
-        if self.metadata.finished {
+        if self.inner.metadata.finished {
             cmd("DEL")
                 .arg(&job_key)
-                .query_async::<_, ()>(connection)
+                .query_async::<_, ()>(&mut *connection)
                 .await?;
             return Ok(());
         }
@@ -118,41 +118,33 @@ impl<'a, D: Serialize + DeserializeOwned> Job<'a, D> {
         cmd("SET")
             .arg(&job_key)
             .arg(&serialized)
-            .query_async::<_, ()>(connection)
+            .query_async::<_, ()>(&mut *connection)
             .await?;
         Ok(())
     }
 
-    pub async fn publish(
-        &mut self,
-        connection: &mut impl redis::aio::ConnectionLike,
-    ) -> Result<(), RedisError> {
-        self.save(connection).await?;
-        self.queue.publish(&self.nonce, connection).await?;
+    pub async fn publish(&mut self) -> Result<(), RedisError> {
+        let queue = self.queue.unwrap();
+        self.save().await?;
+        queue.publish(&self.inner.nonce).await?;
         Ok(())
     }
 
-    pub async fn r#return(
-        &mut self,
-        connection: &mut impl redis::aio::ConnectionLike,
-    ) -> Result<(), RedisError> {
+    pub async fn r#return(&mut self) -> Result<(), RedisError> {
         if self.consumer.is_none() {
             panic!("\"Job::return\" must be called from Consumer job")
         }
 
-        self.publish(connection).await?;
+        self.publish().await?;
         let consumer = self.consumer.as_ref().unwrap();
-        consumer.drop_job(&self.nonce, connection).await
+        consumer.drop_job(&self.inner.nonce).await
     }
 
-    pub async fn delete(
-        &mut self,
-        connection: &mut impl redis::aio::ConnectionLike,
-    ) -> Result<(), RedisError> {
-        self.metadata.finished = true;
-        self.save(connection).await?;
+    pub async fn delete(&mut self) -> Result<(), RedisError> {
+        self.inner.metadata.finished = true;
+        self.save().await?;
         if let Some(consumer) = &self.consumer {
-            consumer.drop_job(&self.nonce, connection).await?;
+            consumer.drop_job(&self.inner.nonce).await?;
         }
 
         Ok(())
