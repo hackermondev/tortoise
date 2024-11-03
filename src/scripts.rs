@@ -1,21 +1,13 @@
 use std::sync::LazyLock;
 
 use redis::Script;
-pub static ATOMIC_MIGRATE_LIST: LazyLock<Script> = LazyLock::new(|| {
-    Script::new(
-        "
-local chunk_size = 1000
-local source = KEYS[1]
-local destination = KEYS[2]
 
-while true do
-    local elements = redis.call('LRANGE', source, 0, chunk_size - 1)
-    if next(elements) == nil then break end  -- Stop when there are no more elements
-    redis.call('RPUSH', destination, unpack(elements))
-    redis.call('LTRIM', source, chunk_size, -1)  -- Remove the elements from the source
-end
+static DROP_CONSUMER_JOBS_SRC: &str = include_str!("../scripts/drop_consumer_jobs.lua");
+pub static DROP_CONSUMER_JOBS: LazyLock<Script> =
+    LazyLock::new(|| Script::new(DROP_CONSUMER_JOBS_SRC));
 
-return redis.call('LLEN', destination)  -- Return the number of elements in the destination list
-",
-    )
-});
+static JOB_SEARCH_SRC: &str = include_str!("../scripts/job_search.lua");
+pub static JOB_SEARCH: LazyLock<Script> = LazyLock::new(|| Script::new(JOB_SEARCH_SRC));
+
+static JOB_SEARCH_GROUP_SRC: &str = include_str!("../scripts/job_search_group.lua");
+pub static JOB_SEARCH_GROUP: LazyLock<Script> = LazyLock::new(|| Script::new(JOB_SEARCH_GROUP_SRC));

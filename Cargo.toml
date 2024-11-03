@@ -1,13 +1,13 @@
 [package]
 name = "tortoise"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
 chrono = { version = "0.4.38", features = ["serde"] }
 gethostname = "0.5.0"
 rand = "0.8.5"
-redis = { version = "0.25", features = ["aio", "script", "tokio-comp"] }
+redis = { version = "0.25", features = ["aio", "script", "tokio-comp", "json"] }
 serde = { version = "1.0.210", features = ["derive"] }
 serde_json = "1.0.128"
 tokio = { version = "1.40.0", features = ["sync"] }

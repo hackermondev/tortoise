@@ -1,4 +1,4 @@
-use redis::{cmd, RedisError};
+use redis::{cmd, JsonAsyncCommands, RedisError};
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 
@@ -8,7 +8,7 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub struct Queue<R: redis::aio::ConnectionLike> {
+pub struct Queue<R: redis::aio::ConnectionLike + Send> {
     pub name: String,
     pub namespace: String,
     pub flags: Flags,
@@ -18,7 +18,7 @@ pub struct Queue<R: redis::aio::ConnectionLike> {
 #[derive(Default, Debug)]
 pub struct Flags {}
 
-impl<R: redis::aio::ConnectionLike> Queue<R> {
+impl<R: redis::aio::ConnectionLike + Send> Queue<R> {
     pub fn new(name: String, namespace: String, _redis: R) -> Self {
         Self {
             name,
@@ -30,9 +30,34 @@ impl<R: redis::aio::ConnectionLike> Queue<R> {
 
     pub(crate) fn key(&self) -> String {
         crate::keys::format(
-            crate::keys::TORTOISE_QUEUE_LIST,
+            crate::keys::TORTOISE_QUEUE_INDEX,
             &[&self.namespace, &self.name],
         )
+    }
+
+    pub async fn ensure_index(&self) -> Result<(), RedisError> {
+        let index_name = self.key();
+        let prefix = crate::keys::format(
+            crate::keys::TORTOISE_QUEUE_JOB_PREFIX,
+            &[&self.namespace, &self.name],
+        );
+
+        let command = crate::keys::format(crate::TORTOISE_JOB_INDEX, &[&index_name, &prefix]);
+        let command = command.replace("\n", " ");
+        let command = command.trim();
+
+        let args = command
+            .split(" ")
+            .filter(|c| !c.is_empty())
+            .collect::<Vec<&str>>();
+
+        let mut connection = self._redis.lock().await;
+        let _ = cmd(args[0])
+            .arg(&args[1..])
+            .query_async::<_, ()>(&mut *connection)
+            .await;
+
+        Ok(())
     }
 
     pub async fn get_job<'a, D: DeserializeOwned>(
@@ -45,33 +70,22 @@ impl<R: redis::aio::ConnectionLike> Queue<R> {
             &[&self.namespace, &self.name, id],
         );
 
-        let data = cmd("GET")
-            .arg(job_key)
-            .query_async::<_, Option<String>>(&mut *connection)
+        let job = connection
+            .json_get::<_, _, Option<String>>(&job_key, ".")
             .await?;
-        if data.is_none() {
+        if job.is_none() {
             return Ok(None);
         }
 
-        let data = data.unwrap();
-        let job = serde_json::from_str::<JobInner<D>>(&data).unwrap();
+        let job = job.unwrap();
+        let job = serde_json::from_str::<JobInner<D>>(&job).unwrap();
         let job = Job {
             inner: job,
             queue: Some(self),
             consumer: None,
         };
+
         Ok(Some(job))
-    }
-
-    pub(crate) async fn publish(&self, job_id: &str) -> Result<(), RedisError> {
-        let mut connection = self._redis.lock().await;
-        cmd("RPUSH")
-            .arg(self.key())
-            .arg(job_id)
-            .query_async::<_, ()>(&mut *connection)
-            .await?;
-
-        Ok(())
     }
 
     pub(crate) async fn get_consumers(
@@ -88,6 +102,8 @@ impl<R: redis::aio::ConnectionLike> Queue<R> {
         c.arg(consumer_key);
         if let Some(cursor) = cursor {
             c.arg(cursor);
+        } else {
+            c.arg(0);
         }
 
         let (cursor, consumers) = c
@@ -97,19 +113,18 @@ impl<R: redis::aio::ConnectionLike> Queue<R> {
     }
 }
 
-pub async fn run_cleanup_job<R: redis::aio::ConnectionLike>(
+pub async fn run_cleanup_job<R: redis::aio::ConnectionLike + Send>(
     queue: &Queue<R>,
-    connection: &mut impl redis::aio::ConnectionLike,
 ) -> Result<(), RedisError> {
     let mut cursor: Option<String> = None;
-    while let Ok((consumers, _cursor)) = queue.get_consumers(cursor).await {
+    while let (consumers, _cursor) = queue.get_consumers(cursor).await? {
         cursor = Some(_cursor);
         if consumers.is_empty() {
             break;
         }
 
         for consumer_id in consumers {
-            let online = Consumer::ping(queue, &consumer_id, connection).await?;
+            let online = Consumer::ping(queue, &consumer_id).await?;
             if online {
                 continue;
             }
@@ -120,7 +135,8 @@ pub async fn run_cleanup_job<R: redis::aio::ConnectionLike>(
                 identifier: consumer_id,
             };
 
-            consumer.drop(connection).await?;
+            println!("{}", consumer.identifier);
+            consumer.drop().await?;
         }
     }
 

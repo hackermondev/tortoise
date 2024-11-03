@@ -1,5 +1,5 @@
 # Tortoise (WIP)
 ## Todo
-- [ ] Request Grouping
-- [ ] Gradual backoff, retry limits
+- [x] Request Grouping
+- [x] Gradual backoff, retry limits
 - [x] Better Redis interface
