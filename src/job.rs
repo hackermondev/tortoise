@@ -97,7 +97,7 @@ impl<'a, D: Serialize + DeserializeOwned + Send + Sync, R: redis::aio::Connectio
         Ok(())
     }
 
-    pub async fn set_scheduled_retry_after(&mut self, scheduled_retry_after: DateTime<Utc>) {
+    pub fn set_scheduled_retry_after(&mut self, scheduled_retry_after: DateTime<Utc>) {
         self.inner.metadata.scheduled_retry_after = scheduled_retry_after;
     }
 
@@ -141,7 +141,7 @@ impl<'a, D: Serialize + DeserializeOwned + Send + Sync, R: redis::aio::Connectio
 impl<'a, D: Send, R: redis::aio::ConnectionLike + Send> Drop for Job<'a, D, R> {
     fn drop(&mut self) {
         if let Some(consumer) = &self.consumer {
-            consumer.garbage.push(self.inner.nonce.clone());
+            let _ = consumer.garbage.try_send(self.inner.nonce.clone());
             log::trace!("pushed job to garbage {}", self.inner.nonce);
         }        
     }

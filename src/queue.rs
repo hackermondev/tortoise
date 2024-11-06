@@ -1,13 +1,14 @@
 use redis::{cmd, JsonAsyncCommands, RedisError};
 use serde::de::DeserializeOwned;
-#[cfg(feature = "garbage_collector")]
-use lariv::Lariv;
 use tokio::sync::Mutex;
 
 use crate::{
     consumer::Consumer,
     job::{Job, JobInner},
 };
+
+#[cfg(feature = "garbage_collector")]
+use tokio::sync::mpsc::channel;
 
 #[derive(Debug)]
 pub struct Queue<R: redis::aio::ConnectionLike + Send> {
@@ -138,13 +139,18 @@ pub async fn run_cleanup_job<R: redis::aio::ConnectionLike + Send>(
             }
 
             log::info!("clean up job, dropping consumer {}", consumer_id);
+            
+            #[cfg(feature = "garbage_collector")]
+            let garbage = channel(1);
             let consumer = Consumer {
                 queue,
                 initialized: true,
                 identifier: consumer_id,
 
                 #[cfg(feature = "garbage_collector")]
-                garbage: Lariv::new(4),
+                garbage: garbage.0,
+                #[cfg(feature = "garbage_collector")]
+                garbage_recv: Mutex::new(garbage.1),
             };
 
             consumer.drop().await?;

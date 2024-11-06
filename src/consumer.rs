@@ -1,11 +1,11 @@
 use chrono::Utc;
-use lariv::LarivIndex;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use redis::{cmd, JsonAsyncCommands, RedisError};
 use serde::de::DeserializeOwned;
 
 #[cfg(feature = "garbage_collector")]
-use lariv::Lariv;
+use tokio::sync::mpsc::{Sender, Receiver, channel};
+use tokio::sync::Mutex;
 
 use crate::{job::Job, queue::Queue, scripts};
 
@@ -18,7 +18,9 @@ pub struct Consumer<'a, R: redis::aio::ConnectionLike + Send> {
     pub(crate) identifier: String,
 
     #[cfg(feature = "garbage_collector")]
-    pub(crate) garbage: Lariv<String>,
+    pub garbage: Sender<String>,
+    #[cfg(feature = "garbage_collector")]
+    pub(crate) garbage_recv: Mutex<Receiver<String>>,
 }
 
 impl<'a, R: redis::aio::ConnectionLike + Send> Consumer<'a, R> {
@@ -34,13 +36,18 @@ impl<'a, R: redis::aio::ConnectionLike + Send> Consumer<'a, R> {
     }
 
     pub fn new(queue: &'a Queue<R>) -> Self {
+        #[cfg(feature = "garbage_collector")]
+        let garbage = channel(50);
+
         Self {
             queue,
             initialized: false,
             identifier: crate::clean_tokenizer_str(&Self::identifier()),
 
             #[cfg(feature = "garbage_collector")]
-            garbage: Lariv::new(100),
+            garbage: garbage.0,
+            #[cfg(feature = "garbage_collector")]
+            garbage_recv: Mutex::new(garbage.1),
         }
     }
 
@@ -219,20 +226,19 @@ impl<'a, R: redis::aio::ConnectionLike + Send> Consumer<'a, R> {
 #[cfg(feature = "garbage_collector")]
 impl<'a, R: redis::aio::ConnectionLike + Send> Consumer<'a, R> {
     pub async fn run_garbage_collector(&self) -> Result<(), RedisError> {
-        if self.garbage.node_num() < 1 {
+        log::trace!("garbage recv lock");
+        let mut garbage_recv = self.garbage_recv.lock().await;
+        log::trace!("{} jobs in garbage", garbage_recv.len());
+        if garbage_recv.is_empty() {
             return Ok(())
         }
 
-        log::trace!("{} jobs in garbage", self.garbage.node_num());
-        for mut job in self.garbage.iter_mut() {
-            if job.len() == 0 {
-                continue
-            }
-
+        log::debug!("{} jobs in garbage", garbage_recv.len());
+        while let Ok(job) = garbage_recv.try_recv() {
+            println!("{}", job);
             self.drop_job(&job).await?;
-            *job = String::default();
             log::debug!("dropped job {job} (garbage)");
-        }   
+        }
         
         Ok(())
     }

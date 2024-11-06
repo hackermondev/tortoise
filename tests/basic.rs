@@ -1,3 +1,4 @@
+use chrono::Duration;
 use serde_json::{json, Value};
 use tortoise::{consumer::Consumer, job::Job, queue::Queue};
 
@@ -69,4 +70,37 @@ async fn basic_job_assignments_group() {
 
     let empty = consumer.next_jobs_group::<Value>(100).await.unwrap();
     assert_eq!(empty.len(), 0);
+}
+
+
+#[tokio::test]
+async fn scheduled_retry_after() {
+    let client = redis::Client::open("redis://127.0.0.1").unwrap();
+    let connection = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("Redis is not running");
+
+    let queue = Queue::new("queue_scheduled".to_string(), "test".to_string(), connection);
+    queue.ensure_index().await.expect("failed to init queue");
+
+    for _ in 0..5 {
+        let data = json!({ "test": true });
+        let mut job = Job::new(data, &queue, None);
+        job.set_scheduled_retry_after(chrono::Utc::now() + tokio::time::Duration::from_secs(5));
+        job.save().await.expect("Failed to save Job");
+    }
+
+    let mut consumer = Consumer::new(&queue);
+    consumer
+        .initalize()
+        .await
+        .expect("Failed to initalize consumer");
+
+    let jobs = consumer.next_jobs::<Value>(5).await.unwrap();
+    assert!(jobs.is_empty());
+    tokio::time::sleep(tokio::time::Duration::from_secs(6)).await;
+
+    let _jobs = consumer.next_jobs::<Value>(5).await.unwrap();
+    assert!(_jobs.len() == 5);
 }
