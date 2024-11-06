@@ -7,7 +7,7 @@ use crate::{consumer::Consumer, queue::Queue};
 static SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug)]
-pub struct Job<'a, D, R: redis::aio::ConnectionLike + Send> {
+pub struct Job<'a, D: Send, R: redis::aio::ConnectionLike + Send> {
     pub inner: JobInner<D>,
     pub(crate) queue: Option<&'a Queue<R>>,
     pub(crate) consumer: Option<&'a Consumer<'a, R>>,
@@ -137,13 +137,12 @@ impl<'a, D: Serialize + DeserializeOwned + Send + Sync, R: redis::aio::Connectio
     }
 }
 
-// impl<'a, D: Send, R: redis::aio::ConnectionLike + Send> Drop for Job<'a, D, R> {
-//     fn drop(&mut self) {
-//         let consumer = self.consumer.take().unwrap();
-//         tokio::spawn(async move {
-//             consumer.drop_job(&self.inner.nonce).await;
-//         });
-
-//         todo!()
-//     }
-// }
+#[cfg(feature = "garbage_collector")]
+impl<'a, D: Send, R: redis::aio::ConnectionLike + Send> Drop for Job<'a, D, R> {
+    fn drop(&mut self) {
+        if let Some(consumer) = &self.consumer {
+            consumer.garbage.push(self.inner.nonce.clone());
+            log::trace!("pushed job to garbage {}", self.inner.nonce);
+        }        
+    }
+}

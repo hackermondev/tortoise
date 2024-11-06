@@ -1,5 +1,7 @@
 use redis::{cmd, JsonAsyncCommands, RedisError};
 use serde::de::DeserializeOwned;
+#[cfg(feature = "garbage_collector")]
+use lariv::Lariv;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -60,7 +62,7 @@ impl<R: redis::aio::ConnectionLike + Send> Queue<R> {
         Ok(())
     }
 
-    pub async fn get_job<'a, D: DeserializeOwned>(
+    pub async fn get_job<'a, D: DeserializeOwned + Send>(
         &self,
         id: &str,
     ) -> Result<Option<Job<D, R>>, RedisError> {
@@ -90,7 +92,7 @@ impl<R: redis::aio::ConnectionLike + Send> Queue<R> {
 
     pub(crate) async fn get_consumers(
         &self,
-        cursor: Option<String>,
+        cursor: &Option<String>,
     ) -> Result<(Vec<String>, String), RedisError> {
         let mut connection = self._redis.lock().await;
         let consumer_key = crate::keys::format(
@@ -117,25 +119,34 @@ pub async fn run_cleanup_job<R: redis::aio::ConnectionLike + Send>(
     queue: &Queue<R>,
 ) -> Result<(), RedisError> {
     let mut cursor: Option<String> = None;
-    while let (consumers, _cursor) = queue.get_consumers(cursor).await? {
-        cursor = Some(_cursor);
+    while let (consumers, _cursor) = queue.get_consumers(&cursor).await? {
         if consumers.is_empty() {
             break;
         }
 
+        if let Some(previous_cursor) = &cursor {
+            if previous_cursor == &_cursor {
+                break;
+            }
+        }
+
+        cursor = Some(_cursor);
         for consumer_id in consumers {
             let online = Consumer::ping(queue, &consumer_id).await?;
             if online {
                 continue;
             }
 
+            log::info!("clean up job, dropping consumer {}", consumer_id);
             let consumer = Consumer {
                 queue,
                 initialized: true,
                 identifier: consumer_id,
+
+                #[cfg(feature = "garbage_collector")]
+                garbage: Lariv::new(4),
             };
 
-            println!("{}", consumer.identifier);
             consumer.drop().await?;
         }
     }

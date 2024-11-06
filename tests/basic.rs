@@ -3,6 +3,7 @@ use tortoise::{consumer::Consumer, job::Job, queue::Queue};
 
 #[tokio::test]
 async fn basic_job_assignments() {
+    pretty_env_logger::init();
     let client = redis::Client::open("redis://127.0.0.1").unwrap();
     let connection = client
         .get_multiplexed_async_connection()

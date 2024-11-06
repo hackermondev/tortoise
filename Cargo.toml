@@ -3,9 +3,14 @@ name = "tortoise"
 version = "0.2.0"
 edition = "2021"
 
+[features]
+garbage_collector = ["lariv"]
+
 [dependencies]
 chrono = { version = "0.4.38", features = ["serde"] }
 gethostname = "0.5.0"
+lariv = { version = "0.3.2", optional = true }
+log = "0.4.22"
 rand = "0.8.5"
 redis = { version = "0.25", features = ["aio", "script", "tokio-comp", "json"] }
 serde = { version = "1.0.210", features = ["derive"] }
@@ -14,3 +19,4 @@ tokio = { version = "1.40.0", features = ["sync"] }
 
 [dev-dependencies]
 tokio = { version = "1.40.0", features = ["full"] }
+pretty_env_logger = "0.5.0"

@@ -1,17 +1,24 @@
 use chrono::Utc;
+use lariv::LarivIndex;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use redis::{cmd, JsonAsyncCommands, RedisError};
 use serde::de::DeserializeOwned;
+
+#[cfg(feature = "garbage_collector")]
+use lariv::Lariv;
 
 use crate::{job::Job, queue::Queue, scripts};
 
 static CONSUMER_PING_EX_SECONDS: usize = 60 * 5;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Consumer<'a, R: redis::aio::ConnectionLike + Send> {
     pub(crate) queue: &'a Queue<R>,
     pub(crate) initialized: bool,
     pub(crate) identifier: String,
+
+    #[cfg(feature = "garbage_collector")]
+    pub(crate) garbage: Lariv<String>,
 }
 
 impl<'a, R: redis::aio::ConnectionLike + Send> Consumer<'a, R> {
@@ -31,6 +38,9 @@ impl<'a, R: redis::aio::ConnectionLike + Send> Consumer<'a, R> {
             queue,
             initialized: false,
             identifier: crate::clean_tokenizer_str(&Self::identifier()),
+
+            #[cfg(feature = "garbage_collector")]
+            garbage: Lariv::new(100),
         }
     }
 
@@ -67,6 +77,7 @@ impl<'a, R: redis::aio::ConnectionLike + Send> Consumer<'a, R> {
     }
 
     pub async fn pong(&self) -> Result<(), RedisError> {
+        log::info!("pong");
         let mut connection = self.queue._redis.lock().await;
         let consumer_ping = crate::keys::format(
             crate::keys::TORTOISE_QUEUE_CONSUMER_PROGRESS_PING,
@@ -131,10 +142,15 @@ impl<R: redis::aio::ConnectionLike + Send> Consumer<'_, R> {
 }
 
 impl<'a, R: redis::aio::ConnectionLike + Send> Consumer<'a, R> {
-    pub async fn next_jobs<'b, D: DeserializeOwned>(
+    pub async fn next_jobs<'b, D: DeserializeOwned + Send>(
         &'a self,
         limit: usize,
     ) -> Result<Vec<Job<'a, D, R>>, RedisError> {
+        #[cfg(feature = "garbage_collector")]
+        if let Err(error) = self.run_garbage_collector().await {
+            log::error!("failed to run garbage collector {:?}", error);
+        };
+
         let mut connection = self.queue._redis.lock().await;
         let id = &self.identifier;
         let index = self.queue.key();
@@ -163,7 +179,7 @@ impl<'a, R: redis::aio::ConnectionLike + Send> Consumer<'a, R> {
         Ok(jobs)
     }
 
-    pub async fn next_jobs_group<'b, D: DeserializeOwned>(
+    pub async fn next_jobs_group<'b, D: DeserializeOwned + Send>(
         &'a self,
         limit: usize,
     ) -> Result<Vec<Job<'a, D, R>>, RedisError> {
@@ -197,5 +213,27 @@ impl<'a, R: redis::aio::ConnectionLike + Send> Consumer<'a, R> {
         }
 
         Ok(jobs)
+    }
+}
+
+#[cfg(feature = "garbage_collector")]
+impl<'a, R: redis::aio::ConnectionLike + Send> Consumer<'a, R> {
+    pub async fn run_garbage_collector(&self) -> Result<(), RedisError> {
+        if self.garbage.node_num() < 1 {
+            return Ok(())
+        }
+
+        log::trace!("{} jobs in garbage", self.garbage.node_num());
+        for mut job in self.garbage.iter_mut() {
+            if job.len() == 0 {
+                continue
+            }
+
+            self.drop_job(&job).await?;
+            *job = String::default();
+            log::debug!("dropped job {job} (garbage)");
+        }   
+        
+        Ok(())
     }
 }
